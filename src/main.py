@@ -7,6 +7,8 @@ and the entry point.
 """
 
 import argparse
+import base64
+import json
 import os
 import re
 import sys
@@ -225,21 +227,32 @@ DIRECTORY_KIND = "directory"
 FILE_KIND = "file"
 MODE_GUI = "GUI"
 MODE_HEADLESS = "headless"
+ENTRIES_TEMPLATE = "{files} files, {directories} directories"
 
 
-def describe(vfs_path, script_path, headless=False):
+def describe(vfs_path, script_path, headless=False, root=None):
     """Return a multi-line dump of the emulator parameters."""
     mode = MODE_HEADLESS if headless else MODE_GUI
     lines = [TITLE]
     lines.append(_parameter("vfs", _describe_vfs(vfs_path)))
     lines.append(_parameter("script", _describe_script(script_path)))
     lines.append(_parameter("mode", mode))
+    if root is not None:
+        lines.append(_parameter("entries", _describe_tree(root)))
     return "\n".join(lines)
 
 
 def _parameter(name, value):
     """Format one parameter line of the debug dump."""
     return PARAMETER_TEMPLATE.format(name=name, value=value)
+
+
+def _describe_tree(root):
+    """Describe the number of files and directories of the loaded tree."""
+    return ENTRIES_TEMPLATE.format(
+        files=count_files(root),
+        directories=count_directories(root),
+    )
 
 
 def _describe_vfs(vfs_path):
@@ -264,6 +277,148 @@ def _describe_script(script_path):
     if not os.path.isfile(absolute):
         return f"{absolute} [{DIRECTORY_KIND}]"
     return f"{absolute} [{PRESENT}]"
+
+
+# ======================================================================
+# vfs.py
+# ======================================================================
+# Virtual file system that lives completely in memory.
+#
+# The tree is built once from a directory of the host system.  After that,
+# every operation works with the in-memory nodes only: the source
+# directory is never modified and is never read again.  A missing or
+# broken source directory is reported with :class:`VfsError`.
+
+ROOT_NAME = "/"
+TEXT_ENCODING = "utf-8"
+JSON_EXTENSION = ".json"
+
+
+class VfsError(Exception):
+    """Raised when the virtual file system cannot be loaded."""
+
+
+class VfsNode:
+    """A single file or directory of the virtual file system."""
+
+    def __init__(self, name, is_dir=False, content=""):
+        """Create a node with a name, a type and optional file content."""
+        self.name = name
+        self.is_dir = is_dir
+        self.content = content
+        self.children = {}
+
+    def size(self):
+        """Return the size of the node in bytes."""
+        if not self.is_dir:
+            return len(self.content.encode(TEXT_ENCODING))
+        return sum(child.size() for child in self.children.values())
+
+
+def load_tree(host_path):
+    """Build the virtual file system from a directory or a JSON description."""
+    if not host_path:
+        raise VfsError("path to the virtual file system is empty")
+    absolute = os.path.abspath(host_path)
+    if not os.path.exists(absolute):
+        raise VfsError(f"path not found: {absolute}")
+    if is_json_path(absolute):
+        return load_json_tree(absolute)
+    if not os.path.isdir(absolute):
+        raise VfsError(f"not a directory: {absolute}")
+    root = VfsNode(ROOT_NAME, is_dir=True)
+    _load_directory(root, absolute)
+    return root
+
+
+def is_json_path(path):
+    """Tell whether the given path points to a JSON description of the tree."""
+    return os.path.splitext(path)[1].lower() == JSON_EXTENSION
+
+
+def load_json_tree(json_path):
+    """Build the virtual file system from a JSON description of the tree."""
+    try:
+        with open(json_path, encoding=TEXT_ENCODING) as handle:
+            data = json.load(handle)
+    except OSError as exc:
+        raise VfsError(f"cannot read file: {json_path} ({exc})")
+    except ValueError as exc:
+        raise VfsError(f"invalid JSON: {json_path} ({exc})")
+    if not isinstance(data, dict):
+        raise VfsError(f"JSON root must be an object: {json_path}")
+    root = VfsNode(ROOT_NAME, is_dir=True)
+    _load_json_directory(root, data, json_path)
+    return root
+
+
+def _load_json_directory(node, data, json_path):
+    """Fill one directory node from an object of the JSON description."""
+    for name in sorted(data):
+        value = data[name]
+        if isinstance(value, dict):
+            child = VfsNode(name, is_dir=True)
+            _load_json_directory(child, value, json_path)
+        elif isinstance(value, str):
+            content = _decode_content(value, json_path)
+            child = VfsNode(name, is_dir=False, content=content)
+        else:
+            raise VfsError(f"unsupported value for '{name}' in {json_path}")
+        node.children[name] = child
+
+
+def _decode_content(value, json_path):
+    """Decode the content of one file stored in the JSON description."""
+    try:
+        return base64.b64decode(value).decode(TEXT_ENCODING)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise VfsError(f"cannot decode content in {json_path} ({exc})")
+
+
+def count_files(node):
+    """Return the number of files in the subtree of the node."""
+    if not node.is_dir:
+        return 1
+    return sum(count_files(child) for child in node.children.values())
+
+
+def count_directories(node):
+    """Return the number of directories in the subtree of the node."""
+    if not node.is_dir:
+        return 0
+    total = 0
+    for child in node.children.values():
+        if child.is_dir:
+            total += 1 + count_directories(child)
+    return total
+
+
+def _load_directory(node, host_path):
+    """Load the content of one directory of the host into a node."""
+    try:
+        names = sorted(os.listdir(host_path))
+    except OSError as exc:
+        raise VfsError(f"cannot read directory: {host_path} ({exc})")
+    for name in names:
+        child_path = os.path.join(host_path, name)
+        if os.path.isdir(child_path):
+            child = VfsNode(name, is_dir=True)
+            _load_directory(child, child_path)
+        else:
+            content = _read_file(child_path)
+            child = VfsNode(name, is_dir=False, content=content)
+        node.children[name] = child
+
+
+def _read_file(path):
+    """Read a text file or raise a VFS error for invalid content."""
+    try:
+        with open(path, encoding=TEXT_ENCODING) as handle:
+            return handle.read()
+    except UnicodeDecodeError as exc:
+        raise VfsError(f"invalid text format: {path} ({exc.reason})")
+    except OSError as exc:
+        raise VfsError(f"cannot read file: {path} ({exc})")
 
 
 # ======================================================================
@@ -485,6 +640,7 @@ SCRIPT_STOPPED = "script: stopped at command '{line}'"
 EXIT_OK = 0
 EXIT_SCRIPT_ERROR = 1
 EXIT_USAGE = 2
+EXIT_VFS_ERROR = 3
 
 
 def parse_args(argv=None):
@@ -511,11 +667,11 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def build_session(vfs_path):
-    """Create the session state for the given VFS path."""
+def build_session(vfs_path, root=None):
+    """Create the session state for the given VFS path and tree."""
     environ = dict(os.environ)
     environ.setdefault("HOME", os.path.expanduser("~"))
-    return ShellState(root=None, cwd=[], environ=environ,
+    return ShellState(root=root, cwd=[], environ=environ,
                             vfs_path=vfs_path)
 
 
@@ -577,9 +733,15 @@ def title_name(vfs_path):
 def main(argv=None):
     """Start the emulator with the given command line parameters."""
     args = parse_args(argv)
-    description = describe(args.vfs, args.script, args.headless)
+    try:
+        root = load_tree(args.vfs)
+    except VfsError as exc:
+        print(describe(args.vfs, args.script, args.headless))
+        print(f"{PROGRAM_NAME}: VFS error: {exc}", file=sys.stderr)
+        return EXIT_VFS_ERROR
+    description = describe(args.vfs, args.script, args.headless, root)
     print(description)
-    session = Shell(build_session(args.vfs))
+    session = Shell(build_session(args.vfs, root))
     if args.headless:
         return run_headless(session, args.script)
     return run_gui(session, title_name(args.vfs), description, args.script)

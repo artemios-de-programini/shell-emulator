@@ -1,0 +1,12 @@
+{
+    "level1": {
+        "level2": {
+            "level3": {
+                "leaf.txt": "VGhpcmQgbGV2ZWwgZmlsZS4NCg=="
+            },
+            "two.txt": "U2Vjb25kIGxldmVsIGZpbGUuDQo="
+        },
+        "one.txt": "Rmlyc3QgbGV2ZWwgZmlsZS4NCg=="
+    },
+    "note.txt": "Um9vdCBub3RlIG9mIHRoZSBkZWVwIHZpcnR1YWwgZmlsZSBzeXN0ZW0uDQo="
+}

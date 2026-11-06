@@ -1,0 +1,8 @@
+{
+    "file1.txt": "RmlsZSAxIGNvbnRlbnQNCg==",
+    "folder1": {
+        "nested_folder": {
+            "secret.txt": "TmVzdGVkIGZpbGUgY29udGVudA0K"
+        }
+    }
+}

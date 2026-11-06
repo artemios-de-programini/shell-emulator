@@ -1,0 +1,8 @@
+ls
+ls /
+cd /folder1
+cd nested_folder
+cd ..
+cd /
+cd
+nosuch-command
