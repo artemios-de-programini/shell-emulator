@@ -6,8 +6,10 @@ virtual file system, the shell dispatcher, the tkinter front end
 and the entry point.
 """
 
+import argparse
 import os
 import re
+import sys
 import tkinter as tk
 
 
@@ -205,6 +207,66 @@ COMMANDS = {
 
 
 # ======================================================================
+# config.py
+# ======================================================================
+# Debug description of all startup parameters of the emulator.
+#
+# Stage 2 requires the emulator to print every given parameter at startup.
+# The description is written to the standard output and is also shown in
+# the window of the graphical interface, so a user always sees which
+# virtual file system and which startup script were selected.
+
+TITLE = "Emulator configuration"
+PARAMETER_TEMPLATE = "  {name:<8} {value}"
+NOT_SPECIFIED = "<not specified>"
+ABSENT = "missing"
+PRESENT = "ok"
+DIRECTORY_KIND = "directory"
+FILE_KIND = "file"
+MODE_GUI = "GUI"
+MODE_HEADLESS = "headless"
+
+
+def describe(vfs_path, script_path, headless=False):
+    """Return a multi-line dump of the emulator parameters."""
+    mode = MODE_HEADLESS if headless else MODE_GUI
+    lines = [TITLE]
+    lines.append(_parameter("vfs", _describe_vfs(vfs_path)))
+    lines.append(_parameter("script", _describe_script(script_path)))
+    lines.append(_parameter("mode", mode))
+    return "\n".join(lines)
+
+
+def _parameter(name, value):
+    """Format one parameter line of the debug dump."""
+    return PARAMETER_TEMPLATE.format(name=name, value=value)
+
+
+def _describe_vfs(vfs_path):
+    """Describe the directory that is used as the virtual file system."""
+    if not vfs_path:
+        return NOT_SPECIFIED
+    absolute = os.path.abspath(vfs_path)
+    if not os.path.exists(absolute):
+        return f"{absolute} [{ABSENT}]"
+    if not os.path.isdir(absolute):
+        return f"{absolute} [{FILE_KIND}]"
+    return f"{absolute} [{DIRECTORY_KIND}]"
+
+
+def _describe_script(script_path):
+    """Describe the startup script of the emulator."""
+    if not script_path:
+        return NOT_SPECIFIED
+    absolute = os.path.abspath(script_path)
+    if not os.path.exists(absolute):
+        return f"{absolute} [{ABSENT}]"
+    if not os.path.isfile(absolute):
+        return f"{absolute} [{DIRECTORY_KIND}]"
+    return f"{absolute} [{PRESENT}]"
+
+
+# ======================================================================
 # shell.py
 # ======================================================================
 # Command dispatch and script execution for the shell emulator.
@@ -303,28 +365,35 @@ class Shell:
 # Tkinter front end of the shell emulator.
 #
 # The window shows a terminal-like transcript: the prompt, the commands
-# typed by the user and the answers of the commands.  All command logic
-# lives in :mod:`shell`, so the interface only renders text and forwards
-# key presses.
+# typed by the user and the answers of the commands.  A startup script is
+# played back command by command, so the window imitates a real dialogue
+# with the user.  All command logic lives in :mod:`shell`, the interface
+# only renders text and forwards key presses.
 
-WINDOW_GEOMETRY = "760x500"
+WINDOW_GEOMETRY = "760x520"
+WINDOW_MIN_WIDTH = 640
+WINDOW_MIN_HEIGHT = 400
 WINDOW_TITLE = "Shell Emulator - VFS: {name}"
 TEXT_FONT = ("Courier New", 12)
 COLOR_BACKGROUND = "#101010"
 COLOR_FOREGROUND = "#33FF66"
 COLOR_CURSOR = "#FFFFFF"
+SCRIPT_DELAY_MS = 250
 BANNER = "UNIX-like shell emulator. Type 'exit' to quit.\n"
+SCRIPT_FAILED = "script: stopped at command '{line}'"
 
 
 class EmulatorWindow:
     """Graphical REPL that renders a session of :class:`shell.Shell`."""
 
-    def __init__(self, root, session, title_name, banner=""):
-        """Create the widgets and show the welcome banner."""
+    def __init__(self, root, session, title_name, banner="", script_path=""):
+        """Create the widgets and start the initial dialogue."""
         self.root = root
         self.session = session
+        self.steps = None
         self.root.title(WINDOW_TITLE.format(name=title_name))
         self.root.geometry(WINDOW_GEOMETRY)
+        self.root.minsize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.text = tk.Text(
             root,
             bg=COLOR_BACKGROUND,
@@ -339,7 +408,11 @@ class EmulatorWindow:
         self.write(BANNER)
         if banner:
             self.write(banner + "\n")
-        self.render_prompt()
+        if script_path:
+            self.steps = self.session.run_script(script_path)
+            self.root.after(SCRIPT_DELAY_MS, self.run_next_step)
+        else:
+            self.render_prompt()
 
     def write(self, text):
         """Append text to the transcript and scroll to the end."""
@@ -351,6 +424,35 @@ class EmulatorWindow:
         self.write(self.session.prompt())
         self.text.mark_set("insert", tk.END)
 
+    def run_next_step(self):
+        """Play the next command of the startup script."""
+        try:
+            line, output = next(self.steps)
+        except StopIteration:
+            self.finish_script()
+            return
+        except OSError as exc:
+            self.steps = None
+            self.write(f"script: {exc}\n")
+            self.render_prompt()
+            return
+        except ExitRequest as request:
+            self.root.destroy()
+            return
+        self.write(f"{self.session.prompt()}{line}\n")
+        if output:
+            self.write(output + "\n")
+        if self.session.status != STATUS_OK:
+            self.write(SCRIPT_FAILED.format(line=line) + "\n")
+            self.finish_script()
+            return
+        self.root.after(SCRIPT_DELAY_MS, self.run_next_step)
+
+    def finish_script(self):
+        """Stop playing the startup script and wait for the user."""
+        self.steps = None
+        self.render_prompt()
+
     def on_enter(self, event):
         """Run the command typed on the current line."""
         line = self.text.get("insert linestart", "end-1c")
@@ -359,7 +461,7 @@ class EmulatorWindow:
         self.write("\n")
         try:
             output = self.session.execute(command)
-        except ExitRequest:
+        except ExitRequest as request:
             self.root.destroy()
             return "break"
         if output:
@@ -373,12 +475,40 @@ class EmulatorWindow:
 # ======================================================================
 # Entry point of the UNIX-like shell emulator.
 #
-# Stage 1 starts the graphical REPL.  The emulator keeps the name of the
-# virtual file system in the window title and expands environment
-# variables of the host system in every command line.
+# The module parses the command line parameters, prints the debug dump of
+# the configuration and starts either the graphical interface or the
+# headless mode that is used by the automatic tests.
 
-DEFAULT_VFS_PATH = "./vfs_root"
-TITLE_NAME = "vfs_root"
+PROGRAM_NAME = "shell-emulator"
+DEFAULT_VFS_PATH = "tests/vfs_files.json"
+SCRIPT_STOPPED = "script: stopped at command '{line}'"
+EXIT_OK = 0
+EXIT_SCRIPT_ERROR = 1
+EXIT_USAGE = 2
+
+
+def parse_args(argv=None):
+    """Parse the command line parameters of the emulator."""
+    parser = argparse.ArgumentParser(
+        prog=PROGRAM_NAME,
+        description="Emulator of a UNIX-like command line.",
+    )
+    parser.add_argument(
+        "--vfs",
+        default=DEFAULT_VFS_PATH,
+        help="path to the directory used as the virtual file system",
+    )
+    parser.add_argument(
+        "--script",
+        default="",
+        help="path to the startup script with emulator commands",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="run without the graphical interface",
+    )
+    return parser.parse_args(argv)
 
 
 def build_session(vfs_path):
@@ -389,14 +519,69 @@ def build_session(vfs_path):
                             vfs_path=vfs_path)
 
 
-def main():
-    """Start the graphical shell emulator."""
-    vfs_path = DEFAULT_VFS_PATH
-    session_state = build_session(vfs_path)
-    session = Shell(session_state)
+def run_headless(session, script_path):
+    """Run the emulator without a GUI and return the exit code."""
+    try:
+        if script_path:
+            return _run_script(session, script_path)
+        return _run_stdin(session)
+    except ExitRequest as request:
+        return request.code
+
+
+def _run_script(session, script_path):
+    """Execute a startup script and print the whole dialogue."""
+    try:
+        for line, output in session.run_script(script_path):
+            print(f"{session.prompt()}{line}")
+            if output:
+                print(output)
+            if session.status != STATUS_OK:
+                print(SCRIPT_STOPPED.format(line=line))
+                return EXIT_SCRIPT_ERROR
+    except OSError as exc:
+        print(f"{PROGRAM_NAME}: {exc}", file=sys.stderr)
+        return EXIT_SCRIPT_ERROR
+    return EXIT_OK
+
+
+def _run_stdin(session):
+    """Read commands from the standard input until end of file."""
+    for raw_line in sys.stdin:
+        command = raw_line.rstrip("\n")
+        print(f"{session.prompt()}{command}")
+        output = session.execute(command)
+        if output:
+            print(output)
+    return EXIT_OK
+
+
+def run_gui(session, title_name, description, script_path):
+    """Start the graphical interface and return its exit code."""
+    import tkinter as tk
+
+    import gui
+
     root = tk.Tk()
-    EmulatorWindow(root, session, TITLE_NAME)
+    EmulatorWindow(root, session, title_name, description, script_path)
     root.mainloop()
-    return 0
+    return EXIT_OK
+
+
+def title_name(vfs_path):
+    """Return the short name of the virtual file system directory."""
+    normalized = os.path.normpath(vfs_path)
+    return os.path.basename(normalized) or normalized
+
+
+def main(argv=None):
+    """Start the emulator with the given command line parameters."""
+    args = parse_args(argv)
+    description = describe(args.vfs, args.script, args.headless)
+    print(description)
+    session = Shell(build_session(args.vfs))
+    if args.headless:
+        return run_headless(session, args.script)
+    return run_gui(session, title_name(args.vfs), description, args.script)
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

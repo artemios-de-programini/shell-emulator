@@ -1,0 +1,5 @@
+ls
+ls a b
+cd /tmp
+cd
+nosuch-command
