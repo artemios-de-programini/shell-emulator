@@ -101,12 +101,14 @@ shell-emulator: VFS error: directory not found: /home/student/absent
 Пример стартового скрипта `scripts/demo.txt`:
 
 ```text
-# Startup script: REPL, environment variables and errors.
+# Startup script: REPL and the basic commands of the emulator.
 ls
-ls -l /tmp
 cd folder1
-cd /missing
-unknown_command
+ls -l
+cat nested_folder/secret.txt
+du
+cal
+cd ..
 exit
 ```
 
@@ -119,6 +121,74 @@ exit
 | `scripts/start_headless.sh`  | оба параметра и режим без интерфейса           |
 | `scripts/start_minimal.sh`   | минимальный набор данных VFS                   |
 | `scripts/start_deep.sh`      | три уровня вложенности каталогов               |
+| `scripts/start_errors.sh`    | обработку ошибок стартового скрипта            |
+
+## Команды
+
+| Команда          | Синтаксис               | Назначение                         |
+|------------------|-------------------------|------------------------------------|
+| `ls`             | `ls [-l] [путь]`        | содержимое каталога                |
+| `cd`             | `cd [путь]`             | смена текущего каталога            |
+| `cat`            | `cat файл...`           | вывод содержимого файлов           |
+| `cal`            | `cal [месяц] [год]`     | календарь месяца или года          |
+| `du`             | `du [-a] [-h] [путь]`   | размеры каталогов и файлов         |
+| `exit`           | `exit [код]`            | выход из эмулятора                 |
+
+Команда `ls` печатает по одному элементу в строке и добавляет `/` к
+каталогам, команда `du` разделяет размер и путь символом табуляции.
+
+## Демонстрация
+
+Ниже приведён реальный вывод эмулятора в режиме без интерфейса на наборе
+данных `vfs/standard`:
+
+```text
+Emulator configuration
+  vfs      /home/student/shell-emulator/vfs/standard [directory]
+  script   /home/student/shell-emulator/scripts/demo.txt [ok]
+  mode     headless
+  entries  2 files, 2 directories
+user@emulator:/$ ls
+file1.txt
+folder1/
+user@emulator:/$ cd folder1
+user@emulator:/folder1$ ls -l
+d      20 nested_folder/
+user@emulator:/folder1$ cat nested_folder/secret.txt
+Nested file content
+user@emulator:/folder1$ du
+20	/folder1/nested_folder
+20	/folder1
+user@emulator:/folder1$ cal
+   November 2026
+Mo Tu We Th Fr Sa Su
+                   1
+ 2  3  4  5  6  7  8
+ 9 10 11 12 13 14 15
+16 17 18 19 20 21 22
+23 24 25 26 27 28 29
+30
+user@emulator:/folder1$ cd ..
+```
+
+Пример обработки ошибок (`scripts/errors.txt`): выполнение стартового
+скрипта останавливается на первой ошибке.
+
+```text
+user@emulator:/$ cat absent.txt
+cat: absent.txt: No such file or directory
+script: stopped at command 'cat absent.txt'
+```
+
+## Сравнение со штатными средствами UNIX
+
+| Команда | Совпадает                                   | Отличается                                        |
+|---------|---------------------------------------------|---------------------------------------------------|
+| `ls`    | сортировка, пометка каталогов, `-l`         | один элемент в строке вместо колонок, нет цветов  |
+| `cd`    | относительные и абсолютные пути, `..`, `~`  | меняется только виртуальный каталог               |
+| `cat`   | конкатенация файлов, коды ошибок            | не читает стандартный вход                        |
+| `cal`   | месяц, год, проверка диапазонов             | английские названия месяцев, неделя с понедельника |
+| `du`    | рекурсивные суммы, `-a`, `-h`, порядок строк| байты содержимого вместо блоков диска             |
 
 ## Реализованные этапы
 
@@ -156,6 +226,16 @@ exit
   уровнями вложенности;
 - скрипты `scripts/start_minimal.sh` и `scripts/start_deep.sh` проверяют
   работу с разными наборами данных.
+
+### Этап 4. Основные команды
+
+- реализована логика команд `ls` и `cd`: сортировка, длинный формат,
+  относительные и абсолютные пути, `..`, `~`, проверка типа узла;
+- добавлены команды `du`, `cal` и `cat` с разбором аргументов и
+  сообщениями об ошибках;
+- стартовый скрипт `scripts/demo.txt` демонстрирует все команды этапа;
+- вывод команд и коды ошибок сопоставлены со штатными средствами UNIX,
+  отличия перечислены в таблице выше.
 
 ## Структура репозитория
 

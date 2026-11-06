@@ -1,0 +1,14 @@
+ls
+ls -l
+ls /folder1
+cd /folder1
+ls
+cd nested_folder
+ls
+cat secret.txt
+cd /
+cat /file1.txt
+du
+du -h /folder1
+cal 10 2026
+nosuch-command

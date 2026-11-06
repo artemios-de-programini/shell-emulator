@@ -9,6 +9,8 @@ and the entry point.
 import argparse
 import base64
 import json
+import calendar
+import datetime
 import os
 import re
 import sys
@@ -184,27 +186,216 @@ def _read_escaped(line, position):
 # name to the message, which keeps the output close to the behaviour of
 # real UNIX tools.
 
+FILE_MODE = "-"
+DIRECTORY_MODE = "d"
+LONG_ENTRY = "{mode} {size:>7} {name}"
+EMPTY_OUTPUT = ""
+CD_MAX_ARGS = 1
+ONE_ARGUMENT = 1
+CAL_MAX_ARGS = 2
+MONTH_MIN = 1
+MONTH_MAX = 12
+YEAR_MIN = 1
+YEAR_MAX = 9999
+BYTES_PER_KIB = 1024.0
+SIZE_UNITS = ("B", "K", "M", "G")
+LS_FLAGS = ("-l",)
+DU_FLAGS = ("-a", "-h")
+
 
 class CommandError(Exception):
     """Raised when a command cannot be executed as requested."""
 
 
-def stub_answer(name, args):
-    """Build the answer of a placeholder command and its arguments."""
-    return f"{name}: arguments {args}"
-
-
 def cmd_ls(state, args):
-    """Placeholder for ls: report the name and the arguments."""
-    return stub_answer("ls", args)
+    """List the content of directories."""
+    flags, operands = _parse_flags(args, LS_FLAGS)
+    if not operands:
+        operands = [CURRENT_DIR]
+    long_format = "-l" in flags
+    lines = []
+    for operand in operands:
+        lines.extend(_list_operand(state, operand, long_format))
+    return "\n".join(lines)
 
 
 def cmd_cd(state, args):
-    """Placeholder for cd: report the name and the arguments."""
-    return stub_answer("cd", args)
+    """Change the working directory of the session."""
+    if len(args) > CD_MAX_ARGS:
+        raise CommandError("too many arguments")
+    target = args[0] if args else HOME_DIR
+    try:
+        parts, node = _lookup(state, target)
+    except PathNotFound:
+        raise CommandError(f"no such file or directory: {target}")
+    except NotADirectory:
+        raise CommandError(f"not a directory: {target}")
+    if not node.is_dir:
+        raise CommandError(f"not a directory: {target}")
+    state.cwd = parts
+    return EMPTY_OUTPUT
+
+
+def cmd_cat(state, args):
+    """Print the content of files."""
+    if not args:
+        raise CommandError("missing operand")
+    chunks = []
+    for target in args:
+        chunks.append(_cat_file(state, target))
+    return "".join(chunks)
+
+
+def cmd_cal(state, args):
+    """Print a calendar for a month, a year or the current month."""
+    today = datetime.date.today()
+    if not args:
+        return calendar.month(today.year, today.month).rstrip()
+    if len(args) == ONE_ARGUMENT:
+        year = _read_number(args[0], "year")
+        _check_range(year, YEAR_MIN, YEAR_MAX, "year")
+        return calendar.calendar(year).rstrip()
+    if len(args) > CAL_MAX_ARGS:
+        raise CommandError("too many arguments")
+    month = _read_number(args[0], "month")
+    year = _read_number(args[1], "year")
+    _check_range(month, MONTH_MIN, MONTH_MAX, "month")
+    _check_range(year, YEAR_MIN, YEAR_MAX, "year")
+    return calendar.month(year, month).rstrip()
+
+
+def cmd_du(state, args):
+    """Report the size of directories and, optionally, of files."""
+    flags, operands = _parse_flags(args, DU_FLAGS)
+    if not operands:
+        operands = [CURRENT_DIR]
+    show_files = "-a" in flags
+    human = "-h" in flags
+    lines = []
+    for operand in operands:
+        lines.extend(_du_operand(state, operand, show_files, human))
+    return "\n".join(lines)
+
+
+def _lookup(state, target):
+    """Resolve a path inside the tree of the current session."""
+    return resolve(state.root, target, state.cwd, state.home)
+
+
+def _parse_flags(args, allowed):
+    """Split arguments into known flags and operands."""
+    flags = []
+    operands = []
+    for argument in args:
+        if argument.startswith("-") and argument not in (None, "-"):
+            if argument not in allowed:
+                raise CommandError(f"invalid option -- '{argument}'")
+            flags.append(argument)
+            continue
+        operands.append(argument)
+    return flags, operands
+
+
+def _list_operand(state, operand, long_format):
+    """Return the lines of one ls operand."""
+    try:
+        _, node = _lookup(state, operand)
+    except PathNotFound:
+        raise CommandError(
+            f"cannot access '{operand}': No such file or directory")
+    except NotADirectory:
+        raise CommandError(f"cannot access '{operand}': Not a directory")
+    if not node.is_dir:
+        return [_format_entry(node, long_format)]
+    return [_format_entry(node.children[name], long_format)
+            for name in sorted(node.children)]
+
+
+def _format_entry(node, long_format):
+    """Format one directory entry of the ls command."""
+    name = node.name + DIR_SEPARATOR if node.is_dir else node.name
+    if not long_format:
+        return name
+    mode = DIRECTORY_MODE if node.is_dir else FILE_MODE
+    return LONG_ENTRY.format(mode=mode, size=node.size(), name=name)
+
+
+def _cat_file(state, target):
+    """Return the content of one file of the cat command."""
+    try:
+        _, node = _lookup(state, target)
+    except PathNotFound:
+        raise CommandError(f"{target}: No such file or directory")
+    except NotADirectory:
+        raise CommandError(f"{target}: Not a directory")
+    if node.is_dir:
+        raise CommandError(f"{target}: Is a directory")
+    return node.content
+
+
+def _read_number(text, name):
+    """Convert a numeric command argument to an integer."""
+    try:
+        return int(text)
+    except ValueError:
+        raise CommandError(f"invalid {name}: {text}")
+
+
+def _check_range(value, low, high, name):
+    """Check that a number belongs to the closed interval."""
+    if value < low or value > high:
+        raise CommandError(f"{name} out of range: {value}")
+
+
+def _human_size(size):
+    """Convert a size in bytes to a short human readable form."""
+    value = float(size)
+    for unit in SIZE_UNITS[:-1]:
+        if value < BYTES_PER_KIB:
+            return f"{value:.0f}{unit}"
+        value /= BYTES_PER_KIB
+    return f"{value:.0f}{SIZE_UNITS[-1]}"
+
+
+def _size_line(size, path, human):
+    """Format one line of the du output."""
+    value = _human_size(size) if human else str(size)
+    return f"{value}\t{path}"
+
+
+def _du_entries(node, path, show_files, human):
+    """Collect the size lines of a node and of its subdirectories."""
+    lines = []
+    if not node.is_dir:
+        return [_size_line(node.size(), path, human)]
+    for name in sorted(node.children):
+        child = node.children[name]
+        child_path = join_path(path, name)
+        if child.is_dir:
+            lines.extend(_du_entries(child, child_path, show_files, human))
+        elif show_files:
+            lines.append(_size_line(child.size(), child_path, human))
+    lines.append(_size_line(node.size(), path, human))
+    return lines
+
+
+def _du_operand(state, operand, show_files, human):
+    """Return the lines of one du operand."""
+    try:
+        parts, node = _lookup(state, operand)
+    except PathNotFound:
+        raise CommandError(
+            f"cannot access '{operand}': No such file or directory")
+    except NotADirectory:
+        raise CommandError(f"cannot access '{operand}': Not a directory")
+    path = DIR_SEPARATOR + DIR_SEPARATOR.join(parts)
+    return _du_entries(node, path, show_files, human)
 COMMANDS = {
     "ls": cmd_ls,
     "cd": cmd_cd,
+    "cat": cmd_cat,
+    "cal": cmd_cal,
+    "du": cmd_du,
 }
 
 
@@ -290,12 +481,27 @@ def _describe_script(script_path):
 # broken source directory is reported with :class:`VfsError`.
 
 ROOT_NAME = "/"
+PARENT_DIR = ".."
+CURRENT_DIR = "."
+HOME_DIR = "~"
 TEXT_ENCODING = "utf-8"
 JSON_EXTENSION = ".json"
 
 
 class VfsError(Exception):
     """Raised when the virtual file system cannot be loaded."""
+
+
+class PathError(Exception):
+    """Raised when a path given by the user cannot be resolved."""
+
+
+class PathNotFound(PathError):
+    """Raised when a component of a path does not exist."""
+
+
+class NotADirectory(PathError):
+    """Raised when a component of a path is a file, not a directory."""
 
 
 class VfsNode:
@@ -373,6 +579,54 @@ def _decode_content(value, json_path):
         return base64.b64decode(value).decode(TEXT_ENCODING)
     except (ValueError, UnicodeDecodeError) as exc:
         raise VfsError(f"cannot decode content in {json_path} ({exc})")
+
+
+def split_path(raw_path, cwd, home):
+    """Turn a user supplied path into normalised parts from the root."""
+    text = raw_path
+    if text == HOME_DIR or text.startswith(HOME_DIR + DIR_SEPARATOR):
+        text = home + text[len(HOME_DIR):]
+    parts = [] if text.startswith(DIR_SEPARATOR) else list(cwd)
+    for part in text.split(DIR_SEPARATOR):
+        if part in (CURRENT_DIR, ""):
+            continue
+        if part == PARENT_DIR:
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return parts
+
+
+def lookup(root, parts):
+    """Return the node at parts and the index of a missing component."""
+    node = root
+    for index, part in enumerate(parts):
+        if not node.is_dir:
+            return node, index
+        child = node.children.get(part)
+        if child is None:
+            return node, index
+        node = child
+    return node, None
+
+
+def resolve(root, raw_path, cwd, home):
+    """Resolve a user path and return its parts together with the node."""
+    parts = split_path(raw_path, cwd, home)
+    node, missing = lookup(root, parts)
+    if missing is None:
+        return parts, node
+    if not node.is_dir:
+        raise NotADirectory(raw_path)
+    raise PathNotFound(raw_path)
+
+
+def join_path(base, name):
+    """Join an absolute directory path and a name."""
+    if base == DIR_SEPARATOR:
+        return DIR_SEPARATOR + name
+    return base + DIR_SEPARATOR + name
 
 
 def count_files(node):
@@ -490,14 +744,15 @@ class Shell:
         return result
 
     def run_script(self, path):
-        """Yield ``(line, output)`` pairs until the script ends or fails."""
+        """Yield prompt, command and output until the script ends or fails."""
         with open(path, encoding="utf-8") as handle:
             for raw_line in handle:
                 line = raw_line.strip()
                 if not line or line.startswith(COMMENT_PREFIX):
                     continue
+                prompt = self.prompt()
                 output = self.execute(line)
-                yield line, output
+                yield prompt, line, output
                 if self.status != STATUS_OK:
                     break
 
@@ -574,6 +829,15 @@ class EmulatorWindow:
         self.text.insert(tk.END, text)
         self.text.see(tk.END)
 
+    def write_output(self, text):
+        """Append the answer of a command and end it with a new line."""
+        if not text:
+            return
+        if text.endswith("\n"):
+            self.write(text)
+            return
+        self.write(text + "\n")
+
     def render_prompt(self):
         """Show a prompt and put the caret after it."""
         self.write(self.session.prompt())
@@ -582,7 +846,7 @@ class EmulatorWindow:
     def run_next_step(self):
         """Play the next command of the startup script."""
         try:
-            line, output = next(self.steps)
+            prompt, line, output = next(self.steps)
         except StopIteration:
             self.finish_script()
             return
@@ -594,9 +858,8 @@ class EmulatorWindow:
         except ExitRequest as request:
             self.root.destroy()
             return
-        self.write(f"{self.session.prompt()}{line}\n")
-        if output:
-            self.write(output + "\n")
+        self.write(f"{prompt}{line}\n")
+        self.write_output(output)
         if self.session.status != STATUS_OK:
             self.write(SCRIPT_FAILED.format(line=line) + "\n")
             self.finish_script()
@@ -619,8 +882,7 @@ class EmulatorWindow:
         except ExitRequest as request:
             self.root.destroy()
             return "break"
-        if output:
-            self.write(output + "\n")
+        self.write_output(output)
         self.render_prompt()
         return "break"
 
@@ -685,13 +947,22 @@ def run_headless(session, script_path):
         return request.code
 
 
+def _print_output(text):
+    """Write the answer of a command to the standard output."""
+    if not text:
+        return
+    if text.endswith("\n"):
+        sys.stdout.write(text)
+        return
+    print(text)
+
+
 def _run_script(session, script_path):
     """Execute a startup script and print the whole dialogue."""
     try:
-        for line, output in session.run_script(script_path):
-            print(f"{session.prompt()}{line}")
-            if output:
-                print(output)
+        for prompt, line, output in session.run_script(script_path):
+            print(f"{prompt}{line}")
+            _print_output(output)
             if session.status != STATUS_OK:
                 print(SCRIPT_STOPPED.format(line=line))
                 return EXIT_SCRIPT_ERROR
@@ -707,8 +978,7 @@ def _run_stdin(session):
         command = raw_line.rstrip("\n")
         print(f"{session.prompt()}{command}")
         output = session.execute(command)
-        if output:
-            print(output)
+        _print_output(output)
     return EXIT_OK
 
 
