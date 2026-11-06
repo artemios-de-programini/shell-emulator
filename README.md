@@ -22,13 +22,13 @@
 Оба скрипта принимают те же параметры, что и сама программа:
 
 ```bash
-./run.sh --vfs ./vfs_root --script ./scripts/demo.txt
+./run.sh --vfs ./vfs/standard --script ./scripts/demo.txt
 ```
 
 Прямой запуск без скриптов-обёрток:
 
 ```bash
-python3 src/main.py --vfs ./vfs_root --script ./scripts/demo.txt
+python3 src/main.py --vfs ./vfs/standard --script ./scripts/demo.txt
 ```
 
 ## Параметры командной строки
@@ -53,7 +53,7 @@ Emulator configuration
   vfs      /home/student/shell-emulator/vfs/standard [directory]
   script   /home/student/shell-emulator/scripts/demo.txt [ok]
   mode     GUI
-  entries  4 files, 3 directories
+  entries  2 files, 2 directories
 ```
 
 ## Виртуальная файловая система
@@ -101,7 +101,7 @@ shell-emulator: VFS error: directory not found: /home/student/absent
 Пример стартового скрипта `scripts/demo.txt`:
 
 ```text
-# Startup script: REPL and the basic commands of the emulator.
+# Startup script: REPL and all commands of the emulator.
 ls
 cd folder1
 ls -l
@@ -109,6 +109,10 @@ cat nested_folder/secret.txt
 du
 cal
 cd ..
+mkdir new_folder
+ls
+rmdir new_folder
+ls
 exit
 ```
 
@@ -132,6 +136,8 @@ exit
 | `cat`            | `cat файл...`           | вывод содержимого файлов           |
 | `cal`            | `cal [месяц] [год]`     | календарь месяца или года          |
 | `du`             | `du [-a] [-h] [путь]`   | размеры каталогов и файлов         |
+| `mkdir`          | `mkdir [-p] каталог...` | создание каталогов                 |
+| `rmdir`          | `rmdir каталог...`      | удаление пустых каталогов          |
 | `exit`           | `exit [код]`            | выход из эмулятора                 |
 
 Команда `ls` печатает по одному элементу в строке и добавляет `/` к
@@ -169,7 +175,19 @@ Mo Tu We Th Fr Sa Su
 23 24 25 26 27 28 29
 30
 user@emulator:/folder1$ cd ..
+user@emulator:/$ mkdir new_folder
+user@emulator:/$ ls
+file1.txt
+folder1/
+new_folder/
+user@emulator:/$ rmdir new_folder
+user@emulator:/$ ls
+file1.txt
+folder1/
 ```
+
+Изменения файловой системы выполняются только в памяти: исходный
+каталог `vfs/standard` после такого сеанса остаётся прежним.
 
 Пример обработки ошибок (`scripts/errors.txt`): выполнение стартового
 скрипта останавливается на первой ошибке.
@@ -189,6 +207,8 @@ script: stopped at command 'cat absent.txt'
 | `cat`   | конкатенация файлов, коды ошибок            | не читает стандартный вход                        |
 | `cal`   | месяц, год, проверка диапазонов             | английские названия месяцев, неделя с понедельника |
 | `du`    | рекурсивные суммы, `-a`, `-h`, порядок строк| байты содержимого вместо блоков диска             |
+| `mkdir` | `-p`, несколько операндов, коды ошибок      | родительские каталоги только виртуальные          |
+| `rmdir` | удаление только пустых каталогов            | не удаляет дерево рекурсивно, нет опций           |
 
 ## Реализованные этапы
 
@@ -237,6 +257,28 @@ script: stopped at command 'cat absent.txt'
 - вывод команд и коды ошибок сопоставлены со штатными средствами UNIX,
   отличия перечислены в таблице выше.
 
+### Этап 5. Дополнительные команды
+
+- реализованы команды `mkdir` и `rmdir`: несколько операндов, режим
+  `-p`, проверка занятого имени, типа узла и непустого каталога;
+- изменения затрагивают только дерево в памяти, исходный каталог VFS
+  остаётся неизменным;
+- стартовый скрипт `scripts/demo.txt` создаёт и удаляет каталог, а
+  вариант `scripts/demo_deep.txt` проверяет вложенные каталоги.
+
+## Оформление репозитория
+
+- исходный код находится только в каталоге `src`, автотесты — только в
+  каталоге `tests`;
+- в корне лежат `run.sh` и `run.bat`, файлы скриптов имеют окончания
+  строк LF и исполняются на Linux без правки;
+- `.gitignore` исключает служебные файлы Python, каталоги сборки и
+  настройки редакторов, поэтому в индексе нет ни одного сгенерированного
+  файла;
+- история состоит из пяти коммитов этапов в формате Conventional Commits,
+  ветки `stage1`…`stage5` указывают на соответствующие этапы, ветка `main`
+  содержит итоговое состояние.
+
 ## Структура репозитория
 
 ```text
@@ -261,3 +303,7 @@ run.bat         скрипт запуска для Windows
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+Набор содержит 114 тестов: разбор командной строки, загрузка виртуальной
+файловой системы, все команды, выполнение стартовых скриптов и сквозные
+запуски эмулятора отдельным процессом.

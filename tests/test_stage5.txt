@@ -1,0 +1,12 @@
+ls
+mkdir projects
+mkdir /home
+ls
+mkdir -p /var/log/nginx
+cd /var/log/nginx
+cd /
+ls /var/log
+rmdir projects
+rmdir /
+mkdir
+rmdir /unknown

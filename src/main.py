@@ -201,6 +201,8 @@ BYTES_PER_KIB = 1024.0
 SIZE_UNITS = ("B", "K", "M", "G")
 LS_FLAGS = ("-l",)
 DU_FLAGS = ("-a", "-h")
+MKDIR_FLAGS = ("-p",)
+NO_FLAGS = ()
 
 
 class CommandError(Exception):
@@ -280,6 +282,27 @@ def cmd_du(state, args):
 def _lookup(state, target):
     """Resolve a path inside the tree of the current session."""
     return resolve(state.root, target, state.cwd, state.home)
+
+
+def cmd_mkdir(state, args):
+    """Create directories in the virtual file system."""
+    flags, operands = _parse_flags(args, MKDIR_FLAGS)
+    if not operands:
+        raise CommandError("missing operand")
+    parents = "-p" in flags
+    for operand in operands:
+        _make_directory(state, operand, parents)
+    return EMPTY_OUTPUT
+
+
+def cmd_rmdir(state, args):
+    """Remove empty directories from the virtual file system."""
+    _, operands = _parse_flags(args, NO_FLAGS)
+    if not operands:
+        raise CommandError("missing operand")
+    for operand in operands:
+        _remove_directory(state, operand)
+    return EMPTY_OUTPUT
 
 
 def _parse_flags(args, allowed):
@@ -390,12 +413,70 @@ def _du_operand(state, operand, show_files, human):
         raise CommandError(f"cannot access '{operand}': Not a directory")
     path = DIR_SEPARATOR + DIR_SEPARATOR.join(parts)
     return _du_entries(node, path, show_files, human)
+
+
+def _make_directory(state, target, parents):
+    """Create one directory, optionally together with its parents."""
+    if not target:
+        raise CommandError(
+            "cannot create directory '': No such file or directory")
+    parts = split_path(target, state.cwd, state.home)
+    if not parts:
+        raise CommandError(
+            f"cannot create directory '{target}': File exists")
+    node = state.root
+    for index, part in enumerate(parts):
+        last = index == len(parts) - 1
+        child = node.children.get(part)
+        if child is None:
+            if not last and not parents:
+                raise CommandError(
+                    f"cannot create directory '{target}': "
+                    "No such file or directory")
+            node = node.add_directory(part)
+            continue
+        if not child.is_dir:
+            raise CommandError(
+                f"cannot create directory '{target}': Not a directory")
+        if last and not parents:
+            raise CommandError(
+                f"cannot create directory '{target}': File exists")
+        node = child
+
+
+def _remove_directory(state, target):
+    """Remove one empty directory from the tree."""
+    if not target:
+        raise CommandError(
+            "failed to remove '': No such file or directory")
+    parts = split_path(target, state.cwd, state.home)
+    if not parts:
+        raise CommandError(
+            f"failed to remove '{target}': Device or resource busy")
+    try:
+        parent = node_at(state.root, parts[:-1])
+    except PathNotFound:
+        raise CommandError(
+            f"failed to remove '{target}': No such file or directory")
+    child = parent.children.get(parts[-1])
+    if child is None:
+        raise CommandError(
+            f"failed to remove '{target}': No such file or directory")
+    if not child.is_dir:
+        raise CommandError(
+            f"failed to remove '{target}': Not a directory")
+    if child.children:
+        raise CommandError(
+            f"failed to remove '{target}': Directory not empty")
+    parent.remove_child(parts[-1])
 COMMANDS = {
     "ls": cmd_ls,
     "cd": cmd_cd,
     "cat": cmd_cat,
     "cal": cmd_cal,
     "du": cmd_du,
+    "mkdir": cmd_mkdir,
+    "rmdir": cmd_rmdir,
 }
 
 
@@ -520,6 +601,16 @@ class VfsNode:
             return len(self.content.encode(TEXT_ENCODING))
         return sum(child.size() for child in self.children.values())
 
+    def add_directory(self, name):
+        """Create an empty child directory and return it."""
+        child = VfsNode(name, is_dir=True)
+        self.children[name] = child
+        return child
+
+    def remove_child(self, name):
+        """Remove a child node by name."""
+        del self.children[name]
+
 
 def load_tree(host_path):
     """Build the virtual file system from a directory or a JSON description."""
@@ -609,6 +700,16 @@ def lookup(root, parts):
             return node, index
         node = child
     return node, None
+
+
+def node_at(root, parts):
+    """Return the node at parts or raise :class:`PathNotFound`."""
+    node = root
+    for part in parts:
+        if not node.is_dir or part not in node.children:
+            raise PathNotFound(part)
+        node = node.children[part]
+    return node
 
 
 def resolve(root, raw_path, cwd, home):
